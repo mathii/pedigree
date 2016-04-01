@@ -1,11 +1,33 @@
-############################################################################
-##
-## plot the simulated chromsomes
-##
-############################################################################
 ## Pedigree manipulation/simulation functions. 
 
 library(kinship2)
+library(RColorBrewer)
+
+############################################################################
+##
+## Check ped
+##
+## Check that the pedigree is well-specified for this analysis.
+## In particular, each founder must have exactly one child.
+## 
+############################################################################
+
+check.ped <- function(ped){
+    ## kinship2 checks
+    pedAll <- pedigree(id=ped$IND, dadid=ped$PAT, momid=ped$MAT, sex=ped$SEX)
+    
+    founders<-ped$IND[ped$MAT==0 & ped$PAT==0]
+    children.m <- ped[ped$MAT %in% founders,"IND"]
+    children.p <- ped[ped$PAT %in% founders,"IND"]
+    n.m <- table(children.m)
+    n.p <- table(children.p)
+    if(!all(n.m==1)){
+        stop(paste0("Founders ", names(n.m)[n.m!=1], "do not have exactly one child"))
+    }
+    if(!all(n.p==1)){
+        stop(paste0("Founders ", names(n.p)[n.p!=1], "do not have exactly one child"))
+    }
+}
 
 ############################################################################
 ##
@@ -67,45 +89,48 @@ simulate.chromosome <- function(ped, len){
 ############################################################################
 
 decode.vectors <- function(ped, recs, ind, trans, vec=data.frame(POS=0, FND=ind, TRANS=trans)){
-    founders<-ped$IND[ped$MAT==0 & ped$PAT==0]
     nonfounders <- ped$IND[ped$MAT!=0 & ped$PAT!=0]
     parents <- ped[ped$IND==ind,c("MAT", "PAT")]
 
     current.paints <- unique(vec$FND)
-    nonfounder.paints <- current.paints[current.paints %in% nonfounders]
 
     chr.segments <- unique(vec[vec$FND %in% nonfounders,c("FND","TRANS")])
 
+    ## Until all the painted segments are founders
     while(NROW(chr.segments)){    
         for(i in 1:NROW(chr.segments)){
             ind <- chr.segments[i,"FND"]
             trans <- chr.segments[i,"TRANS"]
         
-            ## Initial position
+            ## Set the current chunk to one of its parents
             parents <- ped[ped$IND==ind,c("MAT", "PAT")]
-            if(runif(1)<0.5){
-                current <- parents$MAT
-            }else{
-                current <- parents$PAT
-            }            
+            current <- ifelse(runif(1)<0.5, parents$MAT, parents$PAT)
+            vec[vec$FND==ind & vec$TRANS==trans,c(2,3)] <- c(current, ind)
 
-            vec[vec$FND==ind & vec$TRANS==trans,c("FND","TRANS")] <- c(current, ind)
+            ## Every time we hit a recombination in the current gamete (ind->trans), switch parent. 
             rec.pos <- recs[recs$REC==ind & recs$TRANS==trans,"pos"]
             for(rp in rec.pos){
                 other <- parents[parents!=current]
-                vec <- rbind(vec, c(rp, other, ind))
-                vec[vec$FND==ind & vec$pos>rp,"FND"] <- other
+                ## Switch all the chromosomes to the right
+                vec[vec$FND==current & vec$TRANS==ind & vec$pos>rp,2] <- other
+
+                ## Add an additional break, if the recombination happens in an ancestral segment
+                segment.i <- max(which(vec$POS<rp)) #This is the ancestral segment at the recomb
+                if(all(vec[segment.i,c(2,3)]==c(current,ind))){
+                    vec <- rbind(vec, c(rp, other, ind))
+                }
                 current <- other
             }
             vec <- vec[order(vec$POS),]
+            
             ## Merge adjacent regions with the same transmission
             ## are you the same as the row above?
             if(NROW(vec)>1){
-                same <- c(FALSE, apply(vec[2:NROW(vec),c("FND", "TRANS")]== vec[1:(NROW(vec)-1),c("FND", "TRANS")], 1, all))
+                same <- c(FALSE, apply(vec[2:NROW(vec),c(2,3)]== vec[1:(NROW(vec)-1),c(2,3)], 1, all))
                 vec <- vec[!same,]
             }
         }
-        chr.segments <- unique(vec[vec$FND %in% nonfounders,c("FND","TRANS")])
+        chr.segments <- unique(vec[vec$FND %in% nonfounders,c(2,3)])
     }
 
     return(vec)
@@ -123,31 +148,34 @@ decode.vectors <- function(ped, recs, ind, trans, vec=data.frame(POS=0, FND=ind,
 ############################################################################
 
 generate.recombinations <- function(ped, len, ind){
-    founders<-ped$IND[ped$MAT==0 & ped$PAT==0]
     nonfounders <- ped$IND[ped$MAT!=0 & ped$PAT!=0]
 
     parents <- ped[ped$IND==ind,c("MAT", "PAT")]
+    mum <- parents$MAT
+    dad <- parents$PAT
     ## maternal
-    if(parents$MAT %in% nonfounders){
+    if(ind %in% nonfounders){
+        ## maternal
         mrate <- 0.5+0.0104*len
+        ## mrate <- 0.013*len
+        ## mrate <- 1
         nmrec <- rpois(1, mrate)
         pos <- round(runif(nmrec)*len,6)
-        mrecs <- data.frame(REC=rep(parents$MAT,nmrec), TRANS=rep(ind,nmrec), pos=pos)
+        mrecs <- data.frame(REC=rep(mum,nmrec), TRANS=rep(ind,nmrec), pos=pos)
         ## recurse
-        amrecs <- generate.recombinations(ped, len, parents$MAT)
-    }else{
-        mrecs <- amrecs <- data.frame(REC=NULL, TRANS=NULL, pos=NULL)
-    }
+        amrecs <- generate.recombinations(ped, len, mum)
 
-    ## paternal
-    if(parents$PAT %in% nonfounders){
+        ## paternal
         prate <- 0.5+0.0032*len
+        ## prate <- 0.013*len
+        ## prate <- 1
         pmrec <- rpois(1, prate)
         pos <- round(runif(pmrec)*len,6)
-        precs <- data.frame(REC=rep(parents$PAT,pmrec), TRANS=rep(ind,pmrec), pos=pos)
+        precs <- data.frame(REC=rep(dad,pmrec), TRANS=rep(ind,pmrec), pos=pos)
         ## recurse
-        aprecs <- generate.recombinations(ped, len, parents$PAT)
+        aprecs <- generate.recombinations(ped, len, dad)
     }else{
+        mrecs <- amrecs <- data.frame(REC=NULL, TRANS=NULL, pos=NULL)
         precs <- aprecs <- data.frame(REC=NULL, TRANS=NULL, pos=NULL)
     }
 
@@ -231,4 +259,37 @@ plot.ped <- function(ped,  cols=NA, color.founders=FALSE){
     cc <- cols[paste0("FND", pedAll$id)]
     plot(pedAll, col=ifelse(is.na(cc), "black", cc), affected=ifelse(is.na(cc), 0, 1))
     
+}
+
+############################################################################
+##
+## get autozygous (i.e. IBD) chunks from map
+##
+############################################################################
+
+ibd.chunks <- function(map, len){
+    if(NROW(map)==1){
+        map$END <- len
+    }else{
+        map$END <- c(map$POS[2:NROW(map)], len)
+    }
+    map$LEN <- map$END-map$POS
+    ibd.map <- map[map$PAT==map$MAT,]
+}
+
+############################################################################
+##
+## get autozygous (i.e. IBD) chunks from list of maps
+##
+############################################################################
+
+ibd.chunks.genome <- function(maps, chr.lens){
+    nchr=length(maps)
+    chunks <- ibd.chunks(maps[[1]], chr.lens[1])
+    if(nchr>1){
+        for(i in 2:nchr){
+            chunks <- rbind(chunks, ibd.chunks(maps[[i]], chr.lens[i]))
+        }
+    }
+    return(chunks)
 }
